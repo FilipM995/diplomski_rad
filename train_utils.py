@@ -5,7 +5,7 @@ import torchvision
 from torch.utils.tensorboard import SummaryWriter
 from torchmetrics.classification import Dice
 from torchmetrics.segmentation import MeanIoU
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, matthews_corrcoef, recall_score, f1_score
 import time
 
 from config import *
@@ -119,5 +119,23 @@ def calculate_metrics(preds: torch.Tensor, targets: torch.Tensor):
         miou = MeanIoU(num_classes=1)
         metric = miou(preds_mean, targets_mean)
         metrics["miou"] = metric.numpy()
+
+    if MATTHEWS:
+        preds_matthews = preds.flatten().cpu().numpy()
+        targets_matthews = targets.flatten().cpu().numpy()
+        metric = matthews_corrcoef(preds_matthews, targets_matthews)
+        metrics["matthews"] = metric
+
+    if RECALL:
+        preds_recall = preds.flatten().cpu().numpy()
+        targets_recall = targets.flatten().cpu().numpy()
+        metric = recall_score(preds_recall, targets_recall)
+        metrics["recall"] = metric
+
+    if F1:
+        preds_f1 = preds.flatten().cpu().numpy()
+        targets_f1 = targets.flatten().cpu().numpy()
+        metric = f1_score(preds_f1, targets_f1)
+        metrics["f1"] = metric
 
     return metrics

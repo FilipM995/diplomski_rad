@@ -1,57 +1,98 @@
+import os
+import shutil
+from sklearn.model_selection import train_test_split
 import torch
-import numpy as np
 import torch.utils
-from DataExplore.dataset_raw import DRIVEDataset, TransformedDataset
-import torchvision
-import segmentation_models_pytorch as smp
-import pytorch_lightning as pl
+from dataset_raw import DRIVEDataset
 from datetime import datetime
 from torch.utils.tensorboard import SummaryWriter
-from torch.utils.data import DataLoader, Subset, random_split
+from torch.utils.data import DataLoader, Subset
 from train_utils import train_one_epoch, save_one_img, calculate_metrics
 from config import *
-from torchvision import transforms
-
-
-train_transforms = transforms.Compose([
-    transforms.RandomHorizontalFlip(),
-    transforms.RandomRotation(10),
-    transforms.ToTensor(),
-])
- 
-test_transforms = transforms.Compose([
-    transforms.ToTensor(),
-])
+import os
+import glob
 
 print("Loading data...")
 
-train_data = DRIVEDataset(root_dir=TRAIN_ROOT_DIR, size=SIZE)
-test_data = DRIVEDataset(root_dir=TEST_ROOT_DIR, size=SIZE, testing=True)
+data_dir = TRAIN_ROOT_DIR + "\\images"
 
-train_dataset, validation_dataset = random_split(
-    train_data, [TRAIN_SIZE, VALIDATION_SIZE]
+identifiers = [
+    f for f in os.listdir(data_dir) if os.path.isfile(os.path.join(data_dir, f))
+]
+
+train_identifiers, val_identifiers = train_test_split(
+    identifiers, test_size=VALIDATION_SIZE, random_state=42
 )
 
-train_dataset=TransformedDataset(train_dataset, train_transforms)
+train_data = DRIVEDataset(
+    root_dir=TRAIN_ROOT_DIR,
+    size=SIZE,
+    identifiers=train_identifiers,
+    channel=CHANNEL,
+    clahe=CLAHE,
+)
+valid_data = DRIVEDataset(
+    root_dir=TRAIN_ROOT_DIR,
+    size=SIZE,
+    identifiers=val_identifiers,
+    channel=CHANNEL,
+    clahe=CLAHE,
+)
+test_data = DRIVEDataset(
+    root_dir=TEST_ROOT_DIR,
+    size=SIZE,
+    testing=True,
+    channel=CHANNEL,
+    clahe=CLAHE,
+)
 
-training_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-validation_loader = DataLoader(validation_dataset, batch_size=BATCH_SIZE, shuffle=True)
+
+training_loader = DataLoader(train_data, batch_size=BATCH_SIZE, shuffle=True)
+validation_loader = DataLoader(valid_data, batch_size=BATCH_SIZE, shuffle=True)
 test_loader = DataLoader(test_data, batch_size=BATCH_SIZE, shuffle=True)
 
 # Assuming `dataset` is your validation dataset and `specific_image_index` is the index of the image you want to print
 specific_image_index = (
     0  # Example index, replace with the actual index of your specific image
 )
-specific_dataset = Subset(validation_dataset, [specific_image_index])
+specific_dataset = Subset(valid_data, [specific_image_index])
 specific_loader = DataLoader(specific_dataset, batch_size=1)
 
 print("Data loaded successfully")
+
+print("Clearing directories...")
+
+
+def delete_old_files(directory, keep_last=10):
+    files = glob.glob(os.path.join(directory, "*"))
+    files.sort(key=os.path.getmtime, reverse=True)
+    for file in files[keep_last:]:
+        try:
+            if os.path.isfile(file):
+                os.remove(file)
+            elif os.path.isdir(file):
+                shutil.rmtree(file)
+        except Exception as e:
+            print(f"Error deleting file {file}: {e}")
+
+
+# Directories to clean
+directories = ["models", "runs"]
+
+for directory in directories:
+    delete_old_files(directory)
 
 print(f"Using {DEVICE} device")
 
 # Initializing in a separate cell so we can easily add more epochs to the same run
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-writer = SummaryWriter("runs/fashion_trainer_{}".format(timestamp))
+writer = SummaryWriter(
+    "runs/trainer_{}_{}_a={}_lr={}_bs={}_clahe={}_{}".format(
+        MODEL_TYPE, ENCODER, AUGMENTATION, LEARNING_RATE, BATCH_SIZE, CLAHE, timestamp
+    )
+)
+print("Model:")
+print(MODEL)
 
 MODEL.to(DEVICE)  # Move MODEL to the appropriate DEVICE
 
@@ -111,18 +152,36 @@ for epoch in range(EPOCHS):
     # Track best performance, and save the MODEL's state
     if avg_vloss < best_vloss:
         best_vloss = avg_vloss
-        model_path = "models\\model_{}_{}".format(timestamp, epoch_number)
+        model_path = "models\\model_{}_{}_{}".format(
+            MODEL_TYPE, timestamp, epoch_number
+        )
         torch.save(MODEL.state_dict(), model_path)
 
     epoch_number += 1
 
 writer.close()
 
-img, mask, fov = next(iter(validation_loader))
-img, mask, fov = img.to(DEVICE), mask.to(DEVICE), fov.to(DEVICE)
-outputs = MODEL(img).cpu()
-outputs = torch.sigmoid(outputs) > 0.5
-mask = mask.cpu()
+
+def evaluate_model(validation_loader, model, device):
+    model.eval()  # Set the model to evaluation mode
+    metrics_sum = {metric: 0 for metric in METRICS}
+    num_batches = 0
+
+    with torch.no_grad():  # Disable gradient calculation
+        for img, mask, fov in validation_loader:
+            img, mask = img.to(device), mask.to(device)
+            outputs = model(img).cpu()
+            outputs = torch.sigmoid(outputs) > 0.5
+            mask = mask.cpu()
+
+            batch_metrics = calculate_metrics(mask.squeeze(), outputs.squeeze())
+            for key in metrics_sum:
+                metrics_sum[key] += batch_metrics[key]
+            num_batches += 1
+
+    # Calculate average metrics
+    avg_metrics = {key: value / num_batches for key, value in metrics_sum.items()}
+    return avg_metrics
 
 
-print(calculate_metrics(mask.squeeze(), outputs.squeeze()))
+print(evaluate_model(validation_loader, MODEL, DEVICE))

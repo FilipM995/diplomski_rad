@@ -1,8 +1,11 @@
 import os
+import random
 from PIL import Image  # For image loading
+import cv2
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+import torchvision.transforms.functional as TF
 
 
 def apply_fov(image, fov):
@@ -16,10 +19,24 @@ def binarize_mask(mask):
     return np.uint8(mask > 0)
 
 
-def load_img(image_path, size, standardize):
+def apply_clahe(image):
+    # Convert the image to a numpy array and transpose to HWC format
+    # Convert to grayscale
+    image = np.transpose(image, (1, 2, 0)).astype(np.float32)
+    image_bw = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    # Ensure the image is in 8-bit format
+    image_bw = (image_bw * 255).astype(np.uint8)
+    # Apply CLAHE
+    clahe = cv2.createCLAHE(clipLimit=5.0)
+    final_img = clahe.apply(image_bw)
+    # Convert back to PIL Image
+    return final_img
+
+
+def load_img(image_path, size, standardize, channel):
     # If path is none return dummy image
     if image_path is None:
-        arr = np.zeros((size[0], size[1]))
+        arr = np.zeros((size[1], size[0]))
         arr = np.expand_dims(arr, axis=0)
         return arr
 
@@ -29,6 +46,9 @@ def load_img(image_path, size, standardize):
 
         # Optional: Convert the image to a numpy array for numerical operations
         img_array = np.array(img)
+
+    if channel in [0, 1, 2] and img_array.ndim == 3:
+        img_array = img_array[:, :, channel]
     # Normalize the image array
     img_array = img_array / 255.0
 
@@ -53,7 +73,9 @@ class DRIVEDataset(Dataset):
         identifiers=None,
         testing=False,
         standardize=False,
-        transform=None,
+        # transform=None,
+        channel=None,
+        clahe=False,
     ):
         """
         Args:
@@ -76,7 +98,9 @@ class DRIVEDataset(Dataset):
         self.size = size
         self.testing = testing
         self.standardize = standardize
-        self.transform = transform
+        # self.transform = transform
+        self.channel = channel
+        self.clahe = clahe
 
     def __len__(self):
         return len(self.image_names)
@@ -98,23 +122,49 @@ class DRIVEDataset(Dataset):
         )  # Assuming masks are in GIF format
 
         image, mask, fov = (
-            load_img(image_path, self.size, self.standardize),
-            load_img(mask_path, self.size, self.standardize),
-            load_img(fov_path, self.size, self.standardize),
+            load_img(image_path, self.size, self.standardize, self.channel),
+            load_img(mask_path, self.size, self.standardize, self.channel),
+            load_img(fov_path, self.size, self.standardize, self.channel),
         )
         mask, fov = binarize_mask(mask), binarize_mask(fov)
 
-        if self.transform:
-            image = np.transpose(image, (1, 2, 0))
-            mask = np.transpose(mask, (1, 2, 0))
-            fov = np.transpose(fov, (1, 2, 0))
-            masks = [mask, fov]
-            transformed = self.transform(image=image, masks=masks)
-            image = transformed["image"]
-            mask, fov = transformed["masks"]
+        # if self.transform:
+        #     # image = np.transpose(image, (1, 2, 0))
+        #     # mask = np.transpose(mask, (1, 2, 0))
+        #     # fov = np.transpose(fov, (1, 2, 0))
+        #     image, mask, fov = (
+        #         torch.from_numpy(image),
+        #         torch.from_numpy(mask),
+        #         torch.from_numpy(fov),
+        #     )
+        #     # masks = [mask, fov]
+        #     # image, mask, fov = self.transform(image, mask, fov)
+        #     # # image = transformed["image"]
+        #     # # mask, fov = transformed["masks"]
 
-            image, mask, fov = image.numpy(), mask.numpy(), fov.numpy()
-            mask, fov = np.transpose(mask, (2, 0, 1)), np.transpose(fov, (2, 0, 1))
+        #     # Random vertical flipping
+        #     if random.random() > 0.5:
+        #         image = TF.vflip(image)
+        #         mask = TF.vflip(mask)
+        #         fov = TF.vflip(fov)
+
+        #     # Random rotation
+        #     if random.random() > 0.5:
+        #         angle = random.randint(0, 45)
+        #         image = TF.rotate(image, angle)
+        #         mask = TF.rotate(mask, angle)
+        #         fov = TF.rotate(fov, angle)
+
+        #     image, mask, fov = image.numpy(), mask.numpy(), fov.numpy()
+        #     # image, mask, fov = (
+        #     #     np.transpose(image, (2, 0, 1)),
+        #     #     np.transpose(mask, (2, 0, 1)),
+        #     #     np.transpose(fov, (2, 0, 1)),
+        #     # )
+
+        if self.clahe:
+            image = apply_clahe(image)
+            image = image / 255.0
 
         image, mask = apply_fov(image, fov), apply_fov(mask, fov)
 
